@@ -1,5 +1,6 @@
 from datasets import load_dataset
 from haystack import Document, Pipeline
+from haystack.components.builders import PromptBuilder
 from haystack.document_stores.in_memory import InMemoryDocumentStore
 from haystack.components.retrievers.in_memory import InMemoryBM25Retriever, InMemoryEmbeddingRetriever
 from haystack.components.embedders import SentenceTransformersDocumentEmbedder, SentenceTransformersTextEmbedder
@@ -71,6 +72,21 @@ def generative_qa_pipeline():
     document_store.write_documents(docs)
     print(f'loaded {document_store.count_documents()}')
 
+    prompt_template = """
+    Based on the following product reviews, answer the question comprehensively.
+    
+    Reviews:
+    {% for document in documents %}
+    - {{ document.content }}
+    {% endfor %}
+    
+    Question: {{ query }}
+    
+    If the reviews don't contain relevant information, clearly state that.
+    
+    Answer: """
+
+    prompt_builder = PromptBuilder(template=prompt_template)
     retriever = InMemoryBM25Retriever(document_store=document_store)
     generator = HuggingFaceLocalGenerator(
         model='vblagoje/bart_lfqa',
@@ -78,15 +94,20 @@ def generative_qa_pipeline():
         generation_kwargs={
             'max_new_tokens': 100,
             'temperature': 0.7,
-            'do_sample': True
+            'do_sample': True,
+            'repetition_penalty': 1.2,
+            'no_repeat_n_gram_size': 3,
+            'early_stopping': True
         }
     )
     generator.warm_up()
 
     pipeline = Pipeline()
     pipeline.add_component('retriever', retriever)
+    pipeline.add_component('prompt_builder', prompt_builder)
     pipeline.add_component('generator', generator)
-    pipeline.connect('retriever.documents', 'generator.documents')
+    pipeline.connect('retriever.documents', 'prompt_builder.documents')
+    pipeline.connect('prompt_builder', 'generator.prompt')
 
     return pipeline
 
@@ -145,39 +166,41 @@ def compare_retrieval_methods():
             print("   ❌ No answer found")
 
 
+def generative_qa():
+    questions = [
+        "What are the main advantages of this product?",
+        "How does this compare to other similar products?",
+        "Would you recommend this for professional photography?",
+        "What should I know before buying this device?"
+    ]
+
+    pipeline = generative_qa_pipeline()
+
+    for question in questions:
+        print(f"\n🤔 Question: {question}")
+        print("-" * 60)
+
+        result = pipeline.run({
+            "retriever": {"query": question, "top_k": 3},
+            "prompt_builder": {"question": question}  # The question is the prompt
+        }, include_outputs_from={'retriever', 'prompt_builder'})
+
+        if result["generator"]["replies"]:
+            generated_answer = result["generator"]["replies"][0]
+            print(f"💡 Generated Answer: {generated_answer}")
+
+            # Show which documents were used
+            print("\n📚 Retrieved contexts used:")
+            for i, doc in enumerate(result["generator"]["documents"][:2]):  # Top 2 docs
+                print(f"   {i + 1}. {doc.content[:100]}...")
+        else:
+            print("❌ No answer generated")
+
+
 if __name__ == '__main__':
-    # # print(docs[:5])
+    # print(docs[:5])
     print("\n\n" + "=" * 80)
     print("🔬 COMPARISON: BM25 vs DPR")
     print("=" * 80)
-    compare_retrieval_methods()
-
-    # Questions that benefit from generative answers
-    # questions = [
-    #     "What are the main advantages of this product?",
-    #     "How does this compare to other similar products?",
-    #     "Would you recommend this for professional photography?",
-    #     "What should I know before buying this device?"
-    # ]
-    #
-    # pipeline = generative_qa_pipeline()
-    #
-    # for question in questions:
-    #     print(f"\n🤔 Question: {question}")
-    #     print("-" * 60)
-    #
-    #     result = pipeline.run({
-    #         "retriever": {"query": question, "top_k": 3},
-    #         "generator": {"prompt": question}  # The question is the prompt
-    #     })
-    #
-    #     if result["generator"]["replies"]:
-    #         generated_answer = result["generator"]["replies"][0]
-    #         print(f"💡 Generated Answer: {generated_answer}")
-    #
-    #         # Show which documents were used
-    #         print("\n📚 Retrieved contexts used:")
-    #         for i, doc in enumerate(result["generator"]["documents"][:2]):  # Top 2 docs
-    #             print(f"   {i + 1}. {doc.content[:100]}...")
-    #     else:
-    #         print("❌ No answer generated")
+    # compare_retrieval_methods()
+    generative_qa()
